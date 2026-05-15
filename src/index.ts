@@ -26,7 +26,7 @@ import type {
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { base64UrlEncode, extractMessageText, headersToMap } from "./email.js";
-import { startAppleStoreChecker, checkAvailability, checkAllSaturdaySlotHours, type AppleStoreCheckerConfig, type AppleStoreAutoBookConfig } from "./apple-store-checker.js";
+import { startAppleStoreChecker, checkAvailability, checkAllSaturdaySlotHours, findEarliestAvailableSlot, type AppleStoreCheckerConfig, type AppleStoreAutoBookConfig } from "./apple-store-checker.js";
 
 type Config = {
   port: number;
@@ -237,42 +237,51 @@ function startDailyRecap(
   appleStoreConfig: AppleStoreCheckerConfig,
   recapHour: number
 ): void {
-  const formatHour = (satDate: string, utcH: number) => {
-    const d = new Date(`${satDate}T${String(utcH).padStart(2, "0")}:00:00Z`);
-    return new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }).format(d);
+  const fmtSlot = (date: string, utcH: number) => {
+    const d = new Date(`${date}T${String(utcH).padStart(2, "0")}:00:00Z`);
+    return new Intl.DateTimeFormat("de-DE", {
+      timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+    }).format(d);
   };
 
   const send = async () => {
     try {
-      const [result, allHours] = await Promise.all([
+      const now = new Date();
+      const daysUntilSat = now.getUTCDay() === 6 ? 7 : (6 - now.getUTCDay() + 7) % 7 || 7;
+      const satDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilSat))
+        .toISOString().slice(0, 10);
+
+      const [result, allSatHours, earliest] = await Promise.all([
         checkAvailability(appleStoreConfig),
-        checkAllSaturdaySlotHours(appleStoreConfig, (() => {
-          const now = new Date();
-          const daysUntilSat = now.getUTCDay() === 6 ? 0 : 6 - now.getUTCDay();
-          const sat = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilSat));
-          return sat.toISOString().slice(0, 10);
-        })())
+        checkAllSaturdaySlotHours(appleStoreConfig, satDate),
+        findEarliestAvailableSlot(appleStoreConfig)
       ]);
 
-      const morningHours = allHours.filter(h => result.saturdayAdvanceSlotUtcHours.includes(h));
-      const otherHours = allHours.filter(h => !result.saturdayAdvanceSlotUtcHours.includes(h));
+      const morningHours = allSatHours.filter(h => result.saturdayAdvanceSlotUtcHours.includes(h));
+      const otherSatHours = allSatHours.filter(h => !result.saturdayAdvanceSlotUtcHours.includes(h));
 
-      let slotLine: string;
+      let satLine: string;
       if (morningHours.length > 0) {
-        slotLine = `✅ Morning slots: ${morningHours.map(h => formatHour(result.saturdayDate, h)).join(", ")}`;
-      } else if (otherHours.length > 0) {
-        slotLine = `🕐 No morning slots yet — closest available: ${otherHours.map(h => formatHour(result.saturdayDate, h)).join(", ")}`;
+        satLine = `✅ Saturday morning slots: ${morningHours.map(h => fmtSlot(satDate, h)).join(", ")}`;
+      } else if (otherSatHours.length > 0) {
+        satLine = `🕐 Saturday slots (not morning): ${otherSatHours.map(h => fmtSlot(satDate, h)).join(", ")}`;
       } else {
-        slotLine = `🔍 No slots published yet for ${result.saturdayDate}`;
+        satLine = `🔍 No Saturday slots yet`;
       }
 
+      const earliestLine = earliest
+        ? earliest.date === satDate
+          ? `📅 Earliest overall: same as target Saturday`
+          : `📅 Earliest overall: ${fmtSlot(earliest.date, earliest.utcHour)}`
+        : `📅 Earliest overall: none found in next 21 days`;
+
       const text = [
-        `<b>🍎 Daily recap — ${new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit" })}</b>`,
+        `<b>🍎 Daily recap — ${now.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit" })}</b>`,
         ``,
         `Store: ${result.storeName}`,
-        `Next Saturday: ${result.saturdayDate}`,
-        slotLine,
-        `Last check: ${new Date(result.checkedAt).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" })} Munich`,
+        `Target: Saturday ${satDate}`,
+        satLine,
+        earliestLine,
         ``,
         `Service is running ✓`
       ].join("\n");

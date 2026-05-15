@@ -106,6 +106,25 @@ export async function checkAllSaturdaySlotHours(config: AppleStoreCheckerConfig,
   return available;
 }
 
+export type EarliestSlot = { date: string; utcHour: number } | null;
+
+export async function findEarliestAvailableSlot(
+  config: AppleStoreCheckerConfig,
+  daysAhead = 21
+): Promise<EarliestSlot> {
+  const now = new Date();
+  for (let d = 1; d <= daysAhead; d++) {
+    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + d));
+    const dateStr = date.toISOString().slice(0, 10);
+    for (let utcH = 6; utcH <= 21; utcH++) {
+      const slots = await fetchSnapshot(dateStr, utcH);
+      const entry = slots?.find(s => s.storeNumber === config.storeId);
+      if (entry?.appointmentsAvailable) return { date: dateStr, utcHour: utcH };
+    }
+  }
+  return null;
+}
+
 export async function checkAvailability(config: AppleStoreCheckerConfig): Promise<AvailabilityCheckResult> {
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
