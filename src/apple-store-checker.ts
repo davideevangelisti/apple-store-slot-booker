@@ -73,12 +73,21 @@ export type AvailabilityCheckResult = {
 
 export async function checkAvailability(config: AppleStoreCheckerConfig): Promise<AvailabilityCheckResult> {
   const now = new Date();
-  const todayStr = now.toISOString().slice(0, 10);
-  const utcHour = now.getUTCHours();
   const satDate = nextSaturdayDate();
 
-  const snapshot = await fetchSnapshot(todayStr, utcHour);
-  const entry = snapshot?.find(s => s.storeNumber === config.storeId);
+  // CDN may have no data for the current hour (e.g. overnight) — try up to 6 past hours
+  let entry: SlotEntry | undefined;
+  for (let hoursBack = 0; hoursBack <= 6; hoursBack++) {
+    const probe = new Date(now.getTime() - hoursBack * 3_600_000);
+    const snapshot = await fetchSnapshot(probe.toISOString().slice(0, 10), probe.getUTCHours());
+    const candidate = snapshot?.find(s => s.storeNumber === config.storeId);
+    if (candidate && candidate.appointmentsAvailable !== undefined && !candidate.errorCode) {
+      entry = candidate;
+      break;
+    }
+    // Also accept entries with errorCode if they have a clear appointmentsAvailable=false (not just missing)
+    if (candidate && hoursBack === 0) entry = candidate;
+  }
 
   const appointmentsAvailable = entry?.appointmentsAvailable === true;
   const firstAvailableAppointment = entry?.firstAvailableAppointment ?? null;

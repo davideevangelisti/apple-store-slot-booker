@@ -212,24 +212,32 @@ async function sendTelegramMessage(botToken: string, chatId: string, text: strin
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
   });
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({})) as any;
+    const retryAfter = (body?.parameters?.retry_after ?? 30) as number;
+    await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+    return sendTelegramMessage(botToken, chatId, text);
+  }
   if (!res.ok) throw new Error(`Telegram API error ${res.status}: ${await res.text()}`);
 }
 
 function msTilNextMunichHour(hour: number): number {
   const now = new Date();
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Europe/Berlin",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false
-  });
-  const parts = Object.fromEntries(formatter.formatToParts(now).map(p => [p.type, p.value]));
-  const todayAtHour = new Date(`${parts.year}-${parts.month}-${parts.day}T${String(hour).padStart(2, "0")}:00:00`);
-  // Convert Munich local time string to UTC by finding the offset
-  const munichOffsetMs = now.getTime() - new Date(formatter.format(now)).getTime();
-  const targetUtc = todayAtHour.getTime() - munichOffsetMs;
-  const ms = targetUtc - now.getTime();
-  return ms > 0 ? ms : ms + 24 * 60 * 60 * 1000;
+  const MS_PER_DAY = 86_400_000;
+  // en-CA gives ISO YYYY-MM-DD format — safe to use in Date constructor
+  const dateFmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Berlin" });
+  const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Berlin", hour: "numeric", hour12: false });
+  for (let daysAhead = 0; daysAhead <= 1; daysAhead++) {
+    const munichDate = dateFmt.format(new Date(now.getTime() + daysAhead * MS_PER_DAY));
+    for (let utcH = Math.max(0, hour - 3); utcH <= Math.min(23, hour + 1); utcH++) {
+      const candidate = new Date(`${munichDate}T${String(utcH).padStart(2, "0")}:00:00Z`);
+      if (parseInt(hourFmt.format(candidate), 10) === hour) {
+        const ms = candidate.getTime() - now.getTime();
+        if (ms > 60_000) return ms; // must be at least 1 min in future
+      }
+    }
+  }
+  return MS_PER_DAY;
 }
 
 function startDailyRecap(
