@@ -1,0 +1,23 @@
+[Unit]
+Description=Gmail ChatGPT MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gmailmcp
+Group=gmailmcp
+WorkingDirectory=/opt/gmail-chatgpt-mcp/current
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/gmail-chatgpt-mcp/gmail-chatgpt-mcp.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/gmail-chatgpt-mcp
+
+[Install]
+WantedBy=multi-user.target
