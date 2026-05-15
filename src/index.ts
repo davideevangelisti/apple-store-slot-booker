@@ -215,6 +215,55 @@ async function sendTelegramMessage(botToken: string, chatId: string, text: strin
   if (!res.ok) throw new Error(`Telegram API error ${res.status}: ${await res.text()}`);
 }
 
+function msTilNextMunichHour(hour: number): number {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Berlin",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(now).map(p => [p.type, p.value]));
+  const todayAtHour = new Date(`${parts.year}-${parts.month}-${parts.day}T${String(hour).padStart(2, "0")}:00:00`);
+  // Convert Munich local time string to UTC by finding the offset
+  const munichOffsetMs = now.getTime() - new Date(formatter.format(now)).getTime();
+  const targetUtc = todayAtHour.getTime() - munichOffsetMs;
+  const ms = targetUtc - now.getTime();
+  return ms > 0 ? ms : ms + 24 * 60 * 60 * 1000;
+}
+
+function startDailyRecap(
+  telegram: { botToken: string; chatId: string },
+  appleStoreConfig: AppleStoreCheckerConfig,
+  recapHour: number
+): void {
+  const send = async () => {
+    try {
+      const result = await checkAvailability(appleStoreConfig);
+      const slots = result.saturdayAdvanceSlotUtcHours.length > 0
+        ? `✅ Advance slots visible for ${result.saturdayDate}`
+        : `🔍 No advance slots yet for ${result.saturdayDate}`;
+      const text = [
+        `<b>🍎 Daily recap — ${new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit" })}</b>`,
+        ``,
+        `Store: ${result.storeName}`,
+        `Next Saturday: ${result.saturdayDate}`,
+        slots,
+        `Last check: ${new Date(result.checkedAt).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" })} Munich`,
+        ``,
+        `Service is running ✓`
+      ].join("\n");
+      await sendTelegramMessage(telegram.botToken, telegram.chatId, text);
+    } catch (err) {
+      console.error("[Daily recap] Failed to send:", err);
+    }
+    setTimeout(send, msTilNextMunichHour(recapHour));
+  };
+
+  setTimeout(send, msTilNextMunichHour(recapHour));
+  console.log(`Daily recap scheduled at ${recapHour}:00 Munich time`);
+}
+
 function token(): string {
   return randomBytes(32).toString("base64url");
 }
@@ -1619,6 +1668,11 @@ async function main() {
     });
     console.log(`Apple Store checker started for ${appleStoreConfig.storeName} (${appleStoreConfig.storeId})`);
     console.log(`Notification email: ${appleStoreConfig.notifyEmail}`);
+
+    if (config.telegram) {
+      const recapHour = Number(process.env.TELEGRAM_RECAP_HOUR ?? 9);
+      startDailyRecap(config.telegram, appleStoreConfig, recapHour);
+    }
   }
 }
 
