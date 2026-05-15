@@ -26,7 +26,7 @@ import type {
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { base64UrlEncode, extractMessageText, headersToMap } from "./email.js";
-import { startAppleStoreChecker, checkAvailability, checkAllSaturdaySlotHours, findEarliestAvailableSlot, type AppleStoreCheckerConfig, type AppleStoreAutoBookConfig } from "./apple-store-checker.js";
+import { startAppleStoreChecker, checkAvailability, type AppleStoreCheckerConfig, type AppleStoreAutoBookConfig } from "./apple-store-checker.js";
 
 type Config = {
   port: number;
@@ -237,49 +237,38 @@ function startDailyRecap(
   appleStoreConfig: AppleStoreCheckerConfig,
   recapHour: number
 ): void {
-  const fmtSlot = (date: string, utcH: number) => {
-    const d = new Date(`${date}T${String(utcH).padStart(2, "0")}:00:00Z`);
-    return new Intl.DateTimeFormat("de-DE", {
-      timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
-    }).format(d);
-  };
+  const fmtSlot = (ts: number) => new Intl.DateTimeFormat("de-DE", {
+    timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+  }).format(new Date(ts * 1000));
 
   const send = async () => {
     try {
       const now = new Date();
-      const daysUntilSat = now.getUTCDay() === 6 ? 7 : (6 - now.getUTCDay() + 7) % 7 || 7;
-      const satDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilSat))
-        .toISOString().slice(0, 10);
-
-      const [result, allSatHours, earliest] = await Promise.all([
-        checkAvailability(appleStoreConfig),
-        checkAllSaturdaySlotHours(appleStoreConfig, satDate),
-        findEarliestAvailableSlot(appleStoreConfig)
-      ]);
-
-      const morningHours = allSatHours.filter(h => result.saturdayAdvanceSlotUtcHours.includes(h));
-      const otherSatHours = allSatHours.filter(h => !result.saturdayAdvanceSlotUtcHours.includes(h));
+      const result = await checkAvailability(appleStoreConfig);
 
       let satLine: string;
-      if (morningHours.length > 0) {
-        satLine = `✅ Saturday morning slots: ${morningHours.map(h => fmtSlot(satDate, h)).join(", ")}`;
-      } else if (otherSatHours.length > 0) {
-        satLine = `🕐 Saturday slots (not morning): ${otherSatHours.map(h => fmtSlot(satDate, h)).join(", ")}`;
+      let earliestLine: string;
+
+      if (result.isTargetSaturdayMorning && result.firstAvailableAppointment) {
+        satLine = `✅ Saturday morning slot: ${fmtSlot(result.firstAvailableAppointment)}`;
+        earliestLine = `📅 Earliest overall: same as target`;
+      } else if (result.firstAvailableAppointment) {
+        const fmted = fmtSlot(result.firstAvailableAppointment);
+        const firstDate = new Date(result.firstAvailableAppointment * 1000).toISOString().slice(0, 10);
+        satLine = firstDate === result.saturdayDate
+          ? `🕐 Saturday slot (not morning): ${fmted}`
+          : `🔍 No Saturday slots yet`;
+        earliestLine = `📅 Earliest overall: ${fmted}`;
       } else {
         satLine = `🔍 No Saturday slots yet`;
+        earliestLine = `📅 Earliest overall: none available`;
       }
-
-      const earliestLine = earliest
-        ? earliest.date === satDate
-          ? `📅 Earliest overall: same as target Saturday`
-          : `📅 Earliest overall: ${fmtSlot(earliest.date, earliest.utcHour)}`
-        : `📅 Earliest overall: none found in next 21 days`;
 
       const text = [
         `<b>🍎 Daily recap — ${now.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit" })}</b>`,
         ``,
         `Store: ${result.storeName}`,
-        `Target: Saturday ${satDate}`,
+        `Target: Saturday ${result.saturdayDate}`,
         satLine,
         earliestLine,
         ``,
@@ -1560,13 +1549,16 @@ function createServer(provider: GmailOAuthProvider, store: JsonStore, config: Co
         throw new Error("Apple Store checker is not enabled. Set APPLE_STORE_ENABLED=true and APPLE_STORE_NOTIFY_EMAIL in the server environment.");
       }
       const result = await checkAvailability(config.appleStore);
+      const firstLabel = result.firstAvailableAppointment
+        ? new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(result.firstAvailableAppointment * 1000))
+        : "none";
       const summary = [
         `Store: ${result.storeName} (${result.storeId})`,
         `Checked at: ${result.checkedAt}`,
-        `Currently available: ${result.currentlyAvailable}`,
-        `Is Saturday morning now: ${result.isSaturdayMorningNow}`,
-        `Next Saturday: ${result.saturdayDate}`,
-        `Advance Saturday slots found: ${result.saturdayAdvanceSlotUtcHours.length > 0 ? result.saturdayAdvanceSlotUtcHours.join(", ") + " (UTC)" : "none yet"}`
+        `Appointments available: ${result.appointmentsAvailable}`,
+        `Earliest slot: ${firstLabel}`,
+        `Target Saturday: ${result.saturdayDate}`,
+        `Target Saturday morning slot ready: ${result.isTargetSaturdayMorning}`
       ].join("\n");
       return {
         structuredContent: result,

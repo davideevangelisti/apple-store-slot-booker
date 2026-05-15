@@ -51,224 +51,147 @@ function isSaturdayMorningMunich(date: Date): boolean {
   return weekday === "Sat" && hour >= 8 && hour < 12;
 }
 
-// Returns today's date if today (UTC) is Saturday, otherwise next Saturday
-function currentOrNextSaturdayDate(): string {
+function nextSaturdayDate(): string {
   const now = new Date();
   const utcDay = now.getUTCDay();
-  const daysUntilSat = utcDay === 6 ? 0 : 6 - utcDay;
+  const daysUntilSat = utcDay === 6 ? 7 : (6 - utcDay + 7) % 7 || 7;
   const sat = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilSat));
   return sat.toISOString().slice(0, 10);
-}
-
-// Find which UTC hours correspond to 8am-11am Munich time on the given date
-function saturdayMorningUtcHours(satDateStr: string): number[] {
-  const result: number[] = [];
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Europe/Berlin",
-    hour: "numeric",
-    hour12: false
-  });
-  for (let utcH = 0; utcH < 24; utcH++) {
-    const d = new Date(`${satDateStr}T${String(utcH).padStart(2, "0")}:00:00Z`);
-    const munichHour = parseInt(fmt.format(d));
-    if (munichHour >= 8 && munichHour < 12) result.push(utcH);
-  }
-  return result;
-}
-
-function formatMunichHour(satDateStr: string, utcHour: number): string {
-  const d = new Date(`${satDateStr}T${String(utcHour).padStart(2, "0")}:00:00Z`);
-  return new Intl.DateTimeFormat("de-DE", {
-    timeZone: "Europe/Berlin",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(d);
 }
 
 export type AvailabilityCheckResult = {
   storeId: string;
   storeName: string;
   checkedAt: string;
-  currentlyAvailable: boolean;
-  isSaturdayMorningNow: boolean;
+  appointmentsAvailable: boolean;
+  // Unix timestamp (seconds) from the CDN — the earliest bookable slot
+  firstAvailableAppointment: number | null;
+  // Whether firstAvailableAppointment falls on next Saturday 08:00-12:00 Munich
+  isTargetSaturdayMorning: boolean;
   saturdayDate: string;
-  // UTC hours for which Saturday-specific CDN files already exist with availability
-  saturdayAdvanceSlotUtcHours: number[];
 };
-
-export async function checkAllSaturdaySlotHours(config: AppleStoreCheckerConfig, satDateStr: string): Promise<number[]> {
-  const available: number[] = [];
-  for (let utcH = 6; utcH <= 21; utcH++) {
-    const slots = await fetchSnapshot(satDateStr, utcH);
-    const entry = slots?.find(s => s.storeNumber === config.storeId);
-    if (entry?.appointmentsAvailable) available.push(utcH);
-  }
-  return available;
-}
-
-export type EarliestSlot = { date: string; utcHour: number } | null;
-
-export async function findEarliestAvailableSlot(
-  config: AppleStoreCheckerConfig,
-  daysAhead = 21
-): Promise<EarliestSlot> {
-  const now = new Date();
-  for (let d = 1; d <= daysAhead; d++) {
-    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + d));
-    const dateStr = date.toISOString().slice(0, 10);
-    for (let utcH = 6; utcH <= 21; utcH++) {
-      const slots = await fetchSnapshot(dateStr, utcH);
-      const entry = slots?.find(s => s.storeNumber === config.storeId);
-      if (entry?.appointmentsAvailable) return { date: dateStr, utcHour: utcH };
-    }
-  }
-  return null;
-}
 
 export async function checkAvailability(config: AppleStoreCheckerConfig): Promise<AvailabilityCheckResult> {
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
   const utcHour = now.getUTCHours();
-  const satDate = currentOrNextSaturdayDate();
+  const satDate = nextSaturdayDate();
 
-  const currentSlots = await fetchSnapshot(todayStr, utcHour);
-  const currentEntry = currentSlots?.find(s => s.storeNumber === config.storeId);
-  const currentlyAvailable = currentEntry?.appointmentsAvailable === true;
-  const isSatMorning = isSaturdayMorningMunich(now);
+  const snapshot = await fetchSnapshot(todayStr, utcHour);
+  const entry = snapshot?.find(s => s.storeNumber === config.storeId);
 
-  const saturdayAdvanceSlotUtcHours: number[] = [];
-  // Only try advance Saturday check when today is NOT already Saturday
-  if (satDate !== todayStr) {
-    const morningHours = saturdayMorningUtcHours(satDate);
-    for (const h of morningHours) {
-      const slots = await fetchSnapshot(satDate, h);
-      const entry = slots?.find(s => s.storeNumber === config.storeId);
-      if (entry?.appointmentsAvailable) saturdayAdvanceSlotUtcHours.push(h);
-    }
+  const appointmentsAvailable = entry?.appointmentsAvailable === true;
+  const firstAvailableAppointment = entry?.firstAvailableAppointment ?? null;
+
+  let isTargetSaturdayMorning = false;
+  if (firstAvailableAppointment) {
+    const firstAvailDate = new Date(firstAvailableAppointment * 1000);
+    isTargetSaturdayMorning = isSaturdayMorningMunich(firstAvailDate)
+      && firstAvailDate.toISOString().slice(0, 10) === satDate;
   }
 
   return {
     storeId: config.storeId,
     storeName: config.storeName,
     checkedAt: now.toISOString(),
-    currentlyAvailable,
-    isSaturdayMorningNow: isSatMorning,
+    appointmentsAvailable,
+    firstAvailableAppointment,
+    isTargetSaturdayMorning,
     saturdayDate: satDate,
-    saturdayAdvanceSlotUtcHours
   };
 }
 
 export function startAppleStoreChecker(
   config: AppleStoreCheckerConfig,
-  sendEmail: (subject: string, body: string) => Promise<void>
+  sendNotify: (subject: string, body: string) => Promise<void>
 ): { stop: () => void } {
   let handledForDate = "";
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const bookingUrl = `https://getsupport.apple.com/locations?locale=de_DE&storeID=${config.storeId}`;
 
-  const sendNotification = async (satDate: string, reason: string, slots?: string) => {
-    const subject = `Apple Store Saturday morning slot available - ${satDate}`;
-    const body = [
-      `Saturday morning appointment slots are now available at ${config.storeName}!`,
-      ``,
-      `Date: ${satDate} (Saturday)`,
-      `Time window: 08:00-12:00 Munich time`,
-      slots ? `Detected hours: ${slots}` : "",
-      `Reason: ${reason}`,
-      ``,
-      `Issue: ${config.issueDescription}`,
-      ``,
-      `Book your appointment now:`,
-      bookingUrl,
-      ``,
-      `Slots fill up quickly - act fast!`
-    ].filter(Boolean).join("\n");
+  const fmtMunich = (ts: number) => new Intl.DateTimeFormat("de-DE", {
+    timeZone: "Europe/Berlin",
+    weekday: "long", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+  }).format(new Date(ts * 1000));
 
-    await sendEmail(subject, body);
-    console.log(`[Apple Store] Notified for ${satDate}: ${reason}`);
+  const sendAlert = async (satDate: string, timeLabel: string) => {
+    await sendNotify(
+      `Apple Store Saturday morning slot available — ${satDate}`,
+      [
+        `Saturday morning slots are available at ${config.storeName}!`,
+        ``,
+        `Earliest slot: ${timeLabel}`,
+        `Issue: ${config.issueDescription}`,
+        ``,
+        `Book now: ${bookingUrl}`,
+        `Slots fill up quickly — act fast!`
+      ].join("\n")
+    );
+    console.log(`[Apple Store] Alert sent for ${satDate} ${timeLabel}`);
   };
 
-  const sendConfirmation = async (
-    satDate: string,
-    timeLabel: string,
-    confirmationNumber?: string
-  ) => {
-    const subject = `Apple Store appointment booked for ${satDate} at ${timeLabel}`;
-    const body = [
-      `Your Genius Bar appointment has been booked at ${config.storeName}.`,
-      ``,
-      `Date: ${satDate} (Saturday)`,
-      `Time: ${timeLabel} (Munich time)`,
-      confirmationNumber ? `Confirmation number: ${confirmationNumber}` : "",
-      ``,
-      `Issue: ${config.issueDescription}`,
-      ``,
-      `Manage your appointment: https://getsupport.apple.com/`,
-    ].filter(Boolean).join("\n");
-
-    await sendEmail(subject, body);
+  const sendConfirmation = async (satDate: string, timeLabel: string, confirmationNumber?: string) => {
+    await sendNotify(
+      `Apple Store appointment booked — ${satDate} at ${timeLabel}`,
+      [
+        `Your Genius Bar appointment has been booked at ${config.storeName}.`,
+        ``,
+        `Date: ${satDate} (Saturday)`,
+        `Time: ${timeLabel} (Munich time)`,
+        confirmationNumber ? `Confirmation: ${confirmationNumber}` : "",
+        `Issue: ${config.issueDescription}`,
+        ``,
+        `Manage: https://getsupport.apple.com/`
+      ].filter(Boolean).join("\n")
+    );
     console.log(`[Apple Store] Confirmation sent for ${satDate} ${timeLabel}`);
   };
 
-  const handleAvailability = async (satDate: string, reason: string, slots?: string) => {
-    if (handledForDate === satDate) return;
+  const handleAvailability = async (result: AvailabilityCheckResult) => {
+    const { saturdayDate, firstAvailableAppointment } = result;
+    if (handledForDate === saturdayDate || !firstAvailableAppointment) return;
+
+    const timeLabel = fmtMunich(firstAvailableAppointment);
 
     if (config.autoBook) {
       const ab = config.autoBook;
-      console.log(`[Apple Store] Availability detected for ${satDate} — launching auto-booker …`);
+      console.log(`[Apple Store] Saturday morning slot detected for ${saturdayDate} — launching auto-booker…`);
       try {
         const { tryBookAppleStoreSaturdaySlot } = await import("./apple-store-booker.js");
-        const result = await tryBookAppleStoreSaturdaySlot({
+        const bookResult = await tryBookAppleStoreSaturdaySlot({
           storeId: config.storeId,
           storeName: config.storeName,
-          saturdayDate: satDate,
-          personal: {
-            firstName: ab.firstName,
-            lastName: ab.lastName,
-            email: ab.email,
-            phone: ab.phone,
-          },
-          priority: {
-            tier1StartHour: ab.slotTier1StartHour,
-            tier1EndHour: ab.slotTier1EndHour,
-          },
+          saturdayDate,
+          personal: { firstName: ab.firstName, lastName: ab.lastName, email: ab.email, phone: ab.phone },
+          priority: { tier1StartHour: ab.slotTier1StartHour, tier1EndHour: ab.slotTier1EndHour },
           debugDir: ab.debugDir,
         });
 
-        if (result.success && result.bookedTimeLabel) {
-          await sendConfirmation(satDate, result.bookedTimeLabel, result.confirmationNumber);
-          handledForDate = satDate;
+        if (bookResult.success && bookResult.bookedTimeLabel) {
+          await sendConfirmation(saturdayDate, bookResult.bookedTimeLabel, bookResult.confirmationNumber);
+          handledForDate = saturdayDate;
           return;
         }
-
-        console.error(`[Apple Store] Auto-booking failed: ${result.error}. Falling back to email notification.`);
+        console.error(`[Apple Store] Auto-booking failed: ${bookResult.error} — falling back to alert.`);
       } catch (err) {
         console.error("[Apple Store] Auto-booker threw unexpectedly:", err);
       }
     }
 
     try {
-      await sendNotification(satDate, reason, slots);
-      handledForDate = satDate;
+      await sendAlert(saturdayDate, timeLabel);
+      handledForDate = saturdayDate;
     } catch (err) {
-      console.error("[Apple Store] Failed to send notification email:", err);
+      console.error("[Apple Store] Failed to send alert:", err);
     }
   };
 
   const run = async () => {
     try {
       const result = await checkAvailability(config);
-
-      if (result.currentlyAvailable && result.isSaturdayMorningNow) {
-        await handleAvailability(result.saturdayDate, "Store has same-day Saturday morning availability");
-      }
-
-      if (result.saturdayAdvanceSlotUtcHours.length > 0) {
-        const slotStr = result.saturdayAdvanceSlotUtcHours
-          .map(h => formatMunichHour(result.saturdayDate, h))
-          .join(", ");
-        await handleAvailability(result.saturdayDate, "Advance Saturday morning slots detected", slotStr);
+      if (result.appointmentsAvailable && result.isTargetSaturdayMorning) {
+        await handleAvailability(result);
       }
     } catch (err) {
       console.error("[Apple Store] Check failed:", err);
