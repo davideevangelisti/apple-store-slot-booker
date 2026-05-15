@@ -26,7 +26,7 @@ import type {
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { base64UrlEncode, extractMessageText, headersToMap } from "./email.js";
-import { startAppleStoreChecker, checkAvailability, type AppleStoreCheckerConfig, type AppleStoreAutoBookConfig } from "./apple-store-checker.js";
+import { startAppleStoreChecker, checkAvailability, checkAllSaturdaySlotHours, type AppleStoreCheckerConfig, type AppleStoreAutoBookConfig } from "./apple-store-checker.js";
 
 type Config = {
   port: number;
@@ -237,18 +237,41 @@ function startDailyRecap(
   appleStoreConfig: AppleStoreCheckerConfig,
   recapHour: number
 ): void {
+  const formatHour = (satDate: string, utcH: number) => {
+    const d = new Date(`${satDate}T${String(utcH).padStart(2, "0")}:00:00Z`);
+    return new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }).format(d);
+  };
+
   const send = async () => {
     try {
-      const result = await checkAvailability(appleStoreConfig);
-      const slots = result.saturdayAdvanceSlotUtcHours.length > 0
-        ? `✅ Advance slots visible for ${result.saturdayDate}`
-        : `🔍 No advance slots yet for ${result.saturdayDate}`;
+      const [result, allHours] = await Promise.all([
+        checkAvailability(appleStoreConfig),
+        checkAllSaturdaySlotHours(appleStoreConfig, (() => {
+          const now = new Date();
+          const daysUntilSat = now.getUTCDay() === 6 ? 0 : 6 - now.getUTCDay();
+          const sat = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilSat));
+          return sat.toISOString().slice(0, 10);
+        })())
+      ]);
+
+      const morningHours = allHours.filter(h => result.saturdayAdvanceSlotUtcHours.includes(h));
+      const otherHours = allHours.filter(h => !result.saturdayAdvanceSlotUtcHours.includes(h));
+
+      let slotLine: string;
+      if (morningHours.length > 0) {
+        slotLine = `✅ Morning slots: ${morningHours.map(h => formatHour(result.saturdayDate, h)).join(", ")}`;
+      } else if (otherHours.length > 0) {
+        slotLine = `🕐 No morning slots yet — closest available: ${otherHours.map(h => formatHour(result.saturdayDate, h)).join(", ")}`;
+      } else {
+        slotLine = `🔍 No slots published yet for ${result.saturdayDate}`;
+      }
+
       const text = [
         `<b>🍎 Daily recap — ${new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit" })}</b>`,
         ``,
         `Store: ${result.storeName}`,
         `Next Saturday: ${result.saturdayDate}`,
-        slots,
+        slotLine,
         `Last check: ${new Date(result.checkedAt).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" })} Munich`,
         ``,
         `Service is running ✓`

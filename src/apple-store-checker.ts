@@ -96,6 +96,16 @@ export type AvailabilityCheckResult = {
   saturdayAdvanceSlotUtcHours: number[];
 };
 
+export async function checkAllSaturdaySlotHours(config: AppleStoreCheckerConfig, satDateStr: string): Promise<number[]> {
+  const available: number[] = [];
+  for (let utcH = 6; utcH <= 21; utcH++) {
+    const slots = await fetchSnapshot(satDateStr, utcH);
+    const entry = slots?.find(s => s.storeNumber === config.storeId);
+    if (entry?.appointmentsAvailable) available.push(utcH);
+  }
+  return available;
+}
+
 export async function checkAvailability(config: AppleStoreCheckerConfig): Promise<AvailabilityCheckResult> {
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
