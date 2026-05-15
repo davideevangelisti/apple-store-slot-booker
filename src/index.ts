@@ -43,6 +43,7 @@ type Config = {
   accessTokenTtlSeconds: number;
   reminderCheckIntervalSeconds: number;
   appleStore: AppleStoreCheckerConfig & { enabled: boolean } | null;
+  telegram: { botToken: string; chatId: string } | null;
 };
 
 type StoredAuthorizationParams = {
@@ -177,6 +178,10 @@ function loadConfig(): Config {
     storePath: resolve(process.env.STORE_PATH || "data/store.json"),
     accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3600),
     reminderCheckIntervalSeconds: Number(process.env.REMINDER_CHECK_INTERVAL_SECONDS || 60),
+    telegram: process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID ? {
+      botToken: process.env.TELEGRAM_BOT_TOKEN,
+      chatId: process.env.TELEGRAM_CHAT_ID,
+    } : null,
     appleStore: process.env.APPLE_STORE_ENABLED === "true" ? {
       enabled: true,
       storeId: process.env.APPLE_STORE_ID || "R045",
@@ -199,6 +204,15 @@ function loadConfig(): Config {
       })() : undefined,
     } : null
   };
+}
+
+async function sendTelegramMessage(botToken: string, chatId: string, text: string): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+  });
+  if (!res.ok) throw new Error(`Telegram API error ${res.status}: ${await res.text()}`);
 }
 
 function token(): string {
@@ -1591,13 +1605,17 @@ async function main() {
   if (config.appleStore) {
     const appleStoreConfig = config.appleStore;
     startAppleStoreChecker(appleStoreConfig, async (subject, body) => {
-      const gmail = await provider.gmailFor(appleStoreConfig.notifyEmail);
-      await gmail.users.messages.send({
-        userId: "me",
-        requestBody: {
-          raw: buildMessageRaw({ to: appleStoreConfig.notifyEmail, subject, body })
-        }
-      });
+      if (config.telegram) {
+        await sendTelegramMessage(config.telegram.botToken, config.telegram.chatId, `<b>${subject}</b>\n\n${body}`);
+      } else {
+        const gmail = await provider.gmailFor(appleStoreConfig.notifyEmail);
+        await gmail.users.messages.send({
+          userId: "me",
+          requestBody: {
+            raw: buildMessageRaw({ to: appleStoreConfig.notifyEmail, subject, body })
+          }
+        });
+      }
     });
     console.log(`Apple Store checker started for ${appleStoreConfig.storeName} (${appleStoreConfig.storeId})`);
     console.log(`Notification email: ${appleStoreConfig.notifyEmail}`);
