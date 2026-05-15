@@ -224,16 +224,21 @@ async function sendTelegramMessage(botToken: string, chatId: string, text: strin
 function msTilNextMunichHour(hour: number): number {
   const now = new Date();
   const MS_PER_DAY = 86_400_000;
-  // en-CA gives ISO YYYY-MM-DD format — safe to use in Date constructor
-  const dateFmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Berlin" });
-  const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Berlin", hour: "numeric", hour12: false });
+  const partsFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Berlin", year: "numeric", month: "2-digit", day: "2-digit"
+  });
+  const hourFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Berlin", hour: "numeric", hour12: false
+  });
   for (let daysAhead = 0; daysAhead <= 1; daysAhead++) {
-    const munichDate = dateFmt.format(new Date(now.getTime() + daysAhead * MS_PER_DAY));
+    const probe = new Date(now.getTime() + daysAhead * MS_PER_DAY);
+    const p = Object.fromEntries(partsFmt.formatToParts(probe).map(x => [x.type, x.value]));
+    const munichDate = `${p.year}-${p.month}-${p.day}`; // always YYYY-MM-DD
     for (let utcH = Math.max(0, hour - 3); utcH <= Math.min(23, hour + 1); utcH++) {
       const candidate = new Date(`${munichDate}T${String(utcH).padStart(2, "0")}:00:00Z`);
       if (parseInt(hourFmt.format(candidate), 10) === hour) {
         const ms = candidate.getTime() - now.getTime();
-        if (ms > 60_000) return ms; // must be at least 1 min in future
+        if (ms > 60_000) return ms;
       }
     }
   }
